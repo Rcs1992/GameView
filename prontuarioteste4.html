@@ -263,6 +263,15 @@
                 grid-template-columns: 1fr 1fr;
             }
         }
+        .folder-status-dot {
+            width: 0.65rem;
+            height: 0.65rem;
+            border-radius: 9999px;
+            display: inline-block;
+            background: #94a3b8;
+        }
+        .folder-status-dot.connected { background: #16a34a; }
+        .folder-status-dot.error { background: #dc2626; }
     </style>
 </head>
 <body class="font-sans antialiased">
@@ -287,6 +296,7 @@
             <button id="btnAvaliacao" class="transition-all duration-200 bg-blue-700 hover:bg-blue-800 text-white font-bold py-2.5 px-6 rounded-xl shadow-md flex items-center gap-2"><i class="fas fa-clipboard-list"></i> AVALIAÇÃO</button>
             <button id="btnEvolucao" class="transition-all duration-200 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2.5 px-6 rounded-xl shadow-md flex items-center gap-2"><i class="fas fa-chart-line"></i> EVOLUÇÃO</button>
             <button id="btnImportar" class="bg-amber-600 hover:bg-amber-700 text-white py-2.5 px-5 rounded-xl shadow-md flex items-center gap-2"><i class="fas fa-upload"></i> Importar</button>
+            <button id="btnSelecionarPasta" type="button" class="bg-teal-700 hover:bg-teal-800 text-white py-2.5 px-5 rounded-xl shadow-md flex items-center gap-2"><i class="fas fa-folder-open"></i> Pasta de evoluções</button>
             <input type="file" id="importFileInput" accept=".json" style="display:none">
         </div>
 
@@ -303,6 +313,22 @@
                     <div><label class="block text-sm font-semibold text-gray-700">Data Avaliação/Evolução</label><input type="date" id="dataAvaliacao" class="mt-1 w-full border border-gray-300 rounded-xl p-2.5"></div>
                     <div><label class="block text-sm font-semibold text-gray-700">Unidade</label><select id="unidade" class="mt-1 w-full border border-gray-300 rounded-xl p-2.5"><option>Sala Verde Adulto</option><option>Sala Amarela Adulto</option><option>Sala Vermelha Adulto</option><option>Sala Amarela Pediátrica</option><option>Sala Vermelha Pediátrica</option></select></div>
                     <div><label class="block text-sm font-semibold text-gray-700">Leito</label><input type="text" id="leito" class="mt-1 w-full border border-gray-300 rounded-xl p-2.5"></div>
+                </div>
+                <div id="pastaStatus" class="mt-4 text-sm text-slate-600 flex items-center gap-2 no-print">
+                    <span id="pastaStatusDot" class="folder-status-dot"></span>
+                    <span id="pastaStatusTexto">Selecione a pasta de evoluções para ativar a busca automática.</span>
+                </div>
+                <div id="pacienteEncontrado" class="hidden mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 no-print">
+                    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                        <div>
+                            <p class="font-bold text-emerald-900"><i class="fas fa-user-check mr-2"></i>Paciente encontrado</p>
+                            <p id="pacienteEncontradoTexto" class="text-sm text-emerald-800 mt-1"></p>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                            <button id="btnCarregarPaciente" type="button" class="bg-emerald-700 hover:bg-emerald-800 text-white font-semibold px-4 py-2 rounded-lg">Carregar dados anteriores</button>
+                            <button id="btnIgnorarPaciente" type="button" class="bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-semibold px-4 py-2 rounded-lg">Ignorar</button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1684,6 +1710,194 @@ calcularDiasVM();
 }
 
 document.getElementById('btnExportarJson').addEventListener('click', exportarJson);
+        // ========== PASTA DE EVOLUÇÕES E BUSCA AUTOMÁTICA POR PRONTUÁRIO ==========
+        const btnSelecionarPasta = document.getElementById('btnSelecionarPasta');
+        const prontuarioInput = document.getElementById('prontuario');
+        const pastaStatusDot = document.getElementById('pastaStatusDot');
+        const pastaStatusTexto = document.getElementById('pastaStatusTexto');
+        const pacienteEncontrado = document.getElementById('pacienteEncontrado');
+        const pacienteEncontradoTexto = document.getElementById('pacienteEncontradoTexto');
+        const btnCarregarPaciente = document.getElementById('btnCarregarPaciente');
+        const btnIgnorarPaciente = document.getElementById('btnIgnorarPaciente');
+
+        let pastaEvolucoesHandle = null;
+        let candidatoEncontrado = null;
+        let buscaProntuarioTimer = null;
+        let numeroDaBuscaAtual = 0;
+
+        function normalizarProntuario(valor) {
+            return String(valor || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        }
+
+        function atualizarStatusPasta(texto, tipo = 'normal') {
+            pastaStatusTexto.textContent = texto;
+            pastaStatusDot.classList.remove('connected', 'error');
+            if (tipo === 'connected') pastaStatusDot.classList.add('connected');
+            if (tipo === 'error') pastaStatusDot.classList.add('error');
+        }
+
+        function ocultarPacienteEncontrado() {
+            candidatoEncontrado = null;
+            pacienteEncontrado.classList.add('hidden');
+        }
+
+        function abrirBancoPastas() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open('prontuario-fisio-pastas', 1);
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function guardarPasta(handle) {
+            const db = await abrirBancoPastas();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction('handles', 'readwrite');
+                tx.objectStore('handles').put(handle, 'pasta-evolucoes');
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error);
+            });
+            db.close();
+        }
+
+        async function recuperarPasta() {
+            const db = await abrirBancoPastas();
+            const handle = await new Promise((resolve, reject) => {
+                const request = db.transaction('handles', 'readonly').objectStore('handles').get('pasta-evolucoes');
+                request.onsuccess = () => resolve(request.result || null);
+                request.onerror = () => reject(request.error);
+            });
+            db.close();
+            return handle;
+        }
+
+        async function pastaTemPermissao(handle, solicitar = false) {
+            if (!handle) return false;
+            const opcoes = { mode: 'read' };
+            if ((await handle.queryPermission(opcoes)) === 'granted') return true;
+            return solicitar && (await handle.requestPermission(opcoes)) === 'granted';
+        }
+
+        function timestampDoEstado(estado, arquivo) {
+            const valor = estado?.campos?.dataAvaliacao || estado?.dataAvaliacao || '';
+            let timestamp = Date.parse(valor);
+            if (!Number.isFinite(timestamp) && /^\d{2}\/\d{2}\/\d{4}$/.test(valor)) {
+                const [dia, mes, ano] = valor.split('/');
+                timestamp = Date.parse(`${ano}-${mes}-${dia}T00:00:00`);
+            }
+            return Number.isFinite(timestamp) ? timestamp : arquivo.lastModified;
+        }
+
+        function formatarDataEncontrada(timestamp) {
+            if (!Number.isFinite(timestamp)) return 'data não informada';
+            return new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC' }).format(new Date(timestamp));
+        }
+
+        async function buscarPacientePorProntuario() {
+            const prontuarioBuscado = normalizarProntuario(prontuarioInput.value);
+            const idDestaBusca = ++numeroDaBuscaAtual;
+            ocultarPacienteEncontrado();
+            if (prontuarioBuscado.length < 3 || !pastaEvolucoesHandle) return;
+
+            if (!(await pastaTemPermissao(pastaEvolucoesHandle))) {
+                atualizarStatusPasta('Clique em “Pasta de evoluções” para autorizar novamente o acesso.', 'error');
+                return;
+            }
+
+            atualizarStatusPasta(`Procurando o prontuário ${prontuarioInput.value.trim()}...`, 'connected');
+            const candidatos = [];
+            try {
+                for await (const [nomeArquivo, handle] of pastaEvolucoesHandle.entries()) {
+                    if (idDestaBusca !== numeroDaBuscaAtual) return;
+                    if (handle.kind !== 'file' || !nomeArquivo.toLowerCase().endsWith('.json')) continue;
+                    const baseNormalizada = normalizarProntuario(nomeArquivo.replace(/\.json$/i, ''));
+                    if (!baseNormalizada.endsWith(prontuarioBuscado)) continue;
+
+                    try {
+                        const arquivo = await handle.getFile();
+                        const estado = JSON.parse(await arquivo.text());
+                        const prontuarioInterno = normalizarProntuario(estado?.campos?.prontuario || estado?.prontuario);
+                        if (prontuarioInterno !== prontuarioBuscado) continue;
+                        candidatos.push({ estado, arquivo, timestamp: timestampDoEstado(estado, arquivo) });
+                    } catch (erroArquivo) {
+                        console.warn('JSON ignorado por estar inválido:', nomeArquivo, erroArquivo);
+                    }
+                }
+
+                if (idDestaBusca !== numeroDaBuscaAtual) return;
+                if (!candidatos.length) {
+                    atualizarStatusPasta(`Nenhuma evolução encontrada para o prontuário ${prontuarioInput.value.trim()}.`, 'connected');
+                    return;
+                }
+
+                candidatos.sort((a, b) => (b.timestamp - a.timestamp) || (b.arquivo.lastModified - a.arquivo.lastModified));
+                candidatoEncontrado = candidatos[0];
+                const nome = candidatoEncontrado.estado?.campos?.nome || 'paciente sem nome informado';
+                pacienteEncontradoTexto.textContent = `${nome} — última evolução: ${formatarDataEncontrada(candidatoEncontrado.timestamp)}${candidatos.length > 1 ? ` (${candidatos.length} arquivos encontrados; será usado o mais recente)` : ''}.`;
+                pacienteEncontrado.classList.remove('hidden');
+                atualizarStatusPasta('Pasta conectada. Evolução anterior localizada.', 'connected');
+            } catch (erro) {
+                console.error('Erro ao pesquisar a pasta:', erro);
+                atualizarStatusPasta('Não foi possível pesquisar a pasta. Selecione-a novamente.', 'error');
+            }
+        }
+
+        btnSelecionarPasta.addEventListener('click', async () => {
+            if (!window.showDirectoryPicker) {
+                alert('A busca automática por pasta exige Google Chrome ou Microsoft Edge atualizado. A importação manual continua disponível.');
+                return;
+            }
+            try {
+                // O botão sempre abre o seletor, permitindo trocar de pasta quando necessário.
+                const handle = await window.showDirectoryPicker({ mode: 'read', id: 'pasta-evolucoes-fisioterapia' });
+                pastaEvolucoesHandle = handle;
+                await guardarPasta(handle);
+                atualizarStatusPasta(`Pasta conectada: ${handle.name}`, 'connected');
+                buscarPacientePorProntuario();
+            } catch (erro) {
+                if (erro.name !== 'AbortError') {
+                    console.error('Erro ao selecionar a pasta:', erro);
+                    atualizarStatusPasta('Não foi possível acessar a pasta selecionada.', 'error');
+                }
+            }
+        });
+
+        prontuarioInput.addEventListener('input', () => {
+            clearTimeout(buscaProntuarioTimer);
+            ocultarPacienteEncontrado();
+            buscaProntuarioTimer = setTimeout(buscarPacientePorProntuario, 600);
+        });
+
+        btnCarregarPaciente.addEventListener('click', () => {
+            if (!candidatoEncontrado) return;
+            restaurarEstadoCompleto(candidatoEncontrado.estado);
+            setMode('evolucao');
+            ocultarPacienteEncontrado();
+            atualizarStatusPasta('Dados anteriores carregados. Nova evolução pronta para preenchimento.', 'connected');
+            document.getElementById('dataAvaliacao').value = new Date().toISOString().split('T')[0];
+        });
+
+        btnIgnorarPaciente.addEventListener('click', ocultarPacienteEncontrado);
+
+        (async function iniciarPastaSalva() {
+            if (!window.showDirectoryPicker || !window.indexedDB) return;
+            try {
+                pastaEvolucoesHandle = await recuperarPasta();
+                if (!pastaEvolucoesHandle) return;
+                if (await pastaTemPermissao(pastaEvolucoesHandle)) {
+                    atualizarStatusPasta(`Pasta conectada: ${pastaEvolucoesHandle.name}`, 'connected');
+                } else {
+                    atualizarStatusPasta('Pasta lembrada. Clique em “Pasta de evoluções” para autorizar o acesso.', 'error');
+                }
+            } catch (erro) {
+                console.warn('Não foi possível recuperar a pasta salva:', erro);
+            }
+        })();
+
         document.getElementById('btnImportar').addEventListener('click', () => document.getElementById('importFileInput')
             .click());
         document.getElementById('importFileInput').addEventListener('change', (e) => {
